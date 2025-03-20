@@ -2,8 +2,9 @@ import * as THREE from 'three';
 import { ColladaLoader } from 'three/addons/loaders/ColladaLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
+import { ColladaExporter } from 'three/addons/exporters/ColladaExporter.js';
 
-let scene, camera, renderer, controls, transformControls, selectedBone = null;
+let scene, camera, renderer, controls, transformControls, selectedBone = null, currentModel;
 const boneDots = [], boneLines = [];
 
 init();
@@ -32,26 +33,15 @@ function init() {
     transformControls.addEventListener('dragging-changed', (event) => {
         controls.enabled = !event.value;
     });
-    scene.add(transformControls);
 
-    // Load Collada model
-    const loader = new ColladaLoader();
-    loader.load('https://raw.githubusercontent.com/mrdoob/three.js/master/examples/models/collada/elf/elf.dae', (collada) => {
-        const model = collada.scene;
-        model.traverse((child) => {
-            if (child.isMesh) {
-                child.material = new THREE.MeshBasicMaterial({
-                    color: 0x808080,
-                    transparent: true,
-                    opacity: 0.5
-                });
-            }
-            if (child.isSkinnedMesh) {
-                visualizeSkeleton(child);
-            }
-        });
-        scene.add(model);
-    });
+    // Model selection
+    const modelSelect = document.getElementById('modelSelect');
+    modelSelect.addEventListener('change', loadModel);
+    loadModel(); // Load initial model
+
+    // Button events
+    document.getElementById('saveBVH').addEventListener('click', exportToBVH);
+    document.getElementById('saveDA Purchase').addEventListener('click', exportToDAE);
 
     // Raycaster for clicking
     const raycaster = new THREE.Raycaster();
@@ -79,7 +69,7 @@ function init() {
             case 't':
                 transformControls.setMode('translate');
                 break;
-            case 'b': // Export to BVH
+            case 'b':
                 exportToBVH();
                 break;
         }
@@ -87,6 +77,37 @@ function init() {
 
     // Resize handler
     window.addEventListener('resize', onWindowResize);
+}
+
+function loadModel() {
+    // Clear previous model
+    if (currentModel) {
+        scene.remove(currentModel);
+        boneDots.length = 0;
+        boneLines.forEach(line => scene.remove(line));
+        boneLines.length = 0;
+    }
+
+    const loader = new ColladaLoader();
+    const url = document.getElementById('modelSelect').value;
+    loader.load(url, (collada) => {
+        currentModel = collada.scene;
+        currentModel.traverse((child) => {
+            if (child.isMesh) {
+                child.material = new THREE.MeshBasicMaterial({
+                    color: 0x808080,
+                    transparent: true,
+                    opacity: 0.5
+                });
+            }
+            if (child.isSkinnedMesh) {
+                visualizeSkeleton(child);
+            }
+        });
+        scene.add(currentModel);
+    }, undefined, (error) => {
+        console.error('Error loading Collada model:', error);
+    });
 }
 
 function visualizeSkeleton(skinnedMesh) {
@@ -133,24 +154,25 @@ function animate() {
     controls.update();
     renderer.render(scene, camera);
 
-    boneDots.forEach(dot => dot.position.copy(dot.userData.bone.worldPosition()));
+    boneDots.forEach(dot => dot.position.copy(dot.userData.bone.getWorldPosition(new THREE.Vector3())));
     boneLines.forEach(line => {
-        const positions = line.geometry.attributes.position.array;
         const bone = line.parent;
         const parentBone = bone.parent;
         if (parentBone && parentBone.isBone) {
-            positions[0] = bone.worldPosition().x;
-            positions[1] = bone.worldPosition().y;
-            positions[2] = bone.worldPosition().z;
-            positions[3] = parentBone.worldPosition().x;
-            positions[4] = parentBone.worldPosition().y;
-            positions[5] = parentBone.worldPosition().z;
+            const positions = line.geometry.attributes.position.array;
+            const bonePos = bone.getWorldPosition(new THREE.Vector3());
+            const parentPos = parentBone.getWorldPosition(new THREE.Vector3());
+            positions[0] = bonePos.x;
+            positions[1] = bonePos.y;
+            positions[2] = bonePos.z;
+            positions[3] = parentPos.x;
+            positions[4] = parentPos.y;
+            positions[5] = parentPos.z;
             line.geometry.attributes.position.needsUpdate = true;
         }
     });
 }
 
-// BVH Export Function
 function exportToBVH() {
     const bones = boneDots.map(dot => dot.userData.bone);
     if (bones.length === 0) return;
@@ -159,13 +181,11 @@ function exportToBVH() {
     const rootBone = bones.find(bone => !bone.parent || !bone.parent.isBone) || bones[0];
     bvhString += buildBVHHierarchy(rootBone, 0);
 
-    // Motion section (single frame for now)
     bvhString += "MOTION\n";
     bvhString += "Frames: 1\n";
-    bvhString += "Frame Time: 0.033333\n"; // ~30 FPS
+    bvhString += "Frame Time: 0.033333\n";
     bvhString += buildBVHMotion(bones);
 
-    // Trigger file download
     const blob = new Blob([bvhString], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -196,14 +216,14 @@ function buildBVHHierarchy(bone, level) {
         str += `${indent}  }\n`;
     }
     str += `${indent}}\n`;
-    return str;
+    return str.replace("HIERARCHY\nJOINT", "HIERARCHY\nROOT");
 }
 
 function buildBVHMotion(bones) {
     let motion = "";
     bones.forEach(bone => {
-        const pos = bone.position; // Local position
-        const rot = new THREE.Euler().setFromQuaternion(bone.quaternion, 'XYZ'); // Convert to Euler angles
+        const pos = bone.position;
+        const rot = new THREE.Euler().setFromQuaternion(bone.quaternion, 'XYZ');
         const posValues = `${pos.x.toFixed(6)} ${pos.y.toFixed(6)} ${pos.z.toFixed(6)}`;
         const rotValues = `${THREE.MathUtils.radToDeg(rot.x).toFixed(6)} ${THREE.MathUtils.radToDeg(rot.y).toFixed(6)} ${THREE.MathUtils.radToDeg(rot.z).toFixed(6)}`;
         motion += `${posValues} ${rotValues} `;
@@ -211,7 +231,16 @@ function buildBVHMotion(bones) {
     return motion.trim() + "\n";
 }
 
-// Replace 'JOINT' with 'ROOT' for the first bone
-function fixRootBone(bvhString) {
-    return bvhString.replace("HIERARCHY\nJOINT", "HIERARCHY\nROOT");
+function exportToDAE() {
+    const exporter = new ColladaExporter();
+    const result = exporter.parse(currentModel);
+    const blob = new Blob([result.data], { type: 'text/xml' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'deformed_model.dae';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
 }
